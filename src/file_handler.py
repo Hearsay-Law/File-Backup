@@ -7,10 +7,83 @@ import shutil
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Set
+from typing import Set, Optional
 import time
-from watchdog.events import FileSystemEventHandler
+import os
 from colorama import Fore, Style
+
+class ProgressBar:
+    """ASCII progress bar for file copying."""
+    
+    def __init__(self, total_size: int, width: int = 50):
+        """
+        Initialize progress bar.
+        
+        Args:
+            total_size: Total size in bytes
+            width: Width of the progress bar in characters
+        """
+        self.total_size = total_size
+        self.width = width
+        self.last_printed_len = 0
+    
+    def update(self, current_size: int) -> None:
+        """
+        Update the progress bar display.
+        
+        Args:
+            current_size: Current size in bytes
+        """
+        percentage = min(100, int((current_size / self.total_size) * 100))
+        filled_width = int(self.width * current_size / self.total_size)
+        
+        # Create the bar
+        bar = ('=' * filled_width) + ('-' * (self.width - filled_width))
+        
+        # Calculate transfer speed
+        speed = current_size / 1024  # KB/s
+        speed_str = f"{speed:.1f} KB/s" if speed < 1024 else f"{speed/1024:.1f} MB/s"
+        
+        # Format progress line
+        progress_line = f"\r[{bar}] {percentage}% ({speed_str})"
+        
+        # Clear previous line if it was longer
+        if len(progress_line) < self.last_printed_len:
+            print('\r' + ' ' * self.last_printed_len, end='')
+            
+        print(progress_line, end='')
+        self.last_printed_len = len(progress_line)
+        
+        # Print newline if complete
+        if percentage == 100:
+            print()
+
+def copy_with_progress(src: Path, dst: Path, chunk_size: int = 8192) -> None:
+    """
+    Copy a file with progress tracking.
+    
+    Args:
+        src: Source file path
+        dst: Destination file path
+        chunk_size: Size of chunks to copy at once
+    """
+    total_size = os.path.getsize(src)
+    progress = ProgressBar(total_size)
+    copied_size = 0
+    
+    with open(src, 'rb') as fsrc, open(dst, 'wb') as fdst:
+        while True:
+            chunk = fsrc.read(chunk_size)
+            if not chunk:
+                break
+            fdst.write(chunk)
+            copied_size += len(chunk)
+            progress.update(copied_size)
+    
+    # Copy metadata (timestamps, permissions)
+    shutil.copystat(src, dst)
+
+from watchdog.events import FileSystemEventHandler
 
 class FileHandler(FileSystemEventHandler):
     """
@@ -30,20 +103,9 @@ class FileHandler(FileSystemEventHandler):
             source_dir: Directory to monitor for new files
             destination_dir: Directory where files should be copied
         """
-        super().__init__()
         self.source_dir = Path(source_dir)
         self.destination_dir = Path(destination_dir)
         self.processing_files: Set[Path] = set()
-
-    def on_created(self, event) -> None:
-        """
-        Handle file creation events.
-        
-        Args:
-            event: File system event object
-        """
-        if not event.is_directory:
-            self._handle_file_event(event.src_path, "created")
 
     def on_modified(self, event) -> None:
         """
@@ -100,8 +162,11 @@ class FileHandler(FileSystemEventHandler):
             if initial_size != source_path.stat().st_size:
                 return  # File is still being written to, will catch it on next modification
 
-            # Copy the file with metadata
-            shutil.copy2(source_path, destination_path)
+            # Log start of copy
+            print(f"{Fore.GREEN}[{current_time}] Copying {file_name}:{Style.RESET_ALL}")
+            
+            # Copy the file with progress bar
+            copy_with_progress(source_path, destination_path)
             
             # Log success
             self._log_success(current_time, file_name, source_path, destination_path)
@@ -136,30 +201,3 @@ class FileHandler(FileSystemEventHandler):
             error: Error message
         """
         print(f"{Fore.RED}[{time_str}] Error copying {file_name}: {error}{Style.RESET_ALL}\n")
-
-    def is_valid_file(self, file_path: Path) -> bool:
-        """
-        Check if a file is valid for copying.
-        
-        Args:
-            file_path: Path to the file to check
-            
-        Returns:
-            bool: True if the file is valid, False otherwise
-        """
-        try:
-            # Check if file exists and is a file (not a directory)
-            if not file_path.is_file():
-                return False
-                
-            # Check if file is readable
-            if not os.access(file_path, os.R_OK):
-                return False
-                
-            # Additional checks could be added here (e.g., file size, extension)
-            
-            return True
-            
-        except Exception as e:
-            logging.error(f"Error checking file validity: {str(e)}")
-            return False
